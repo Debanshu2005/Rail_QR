@@ -1,0 +1,129 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Indian Railways QR Generator</title>
+<link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+<link href="https://fonts.googleapis.com/css2?family=Roboto:wght@400;700&display=swap" rel="stylesheet">
+<style>
+    .azadi-logo {
+    position: absolute;
+    top: 10px;
+    right: 10px;
+    width: 240px; /* increase size */
+    height: auto;
+    z-index: 1000;
+}
+
+}
+
+body {
+    background-color: #f8f9fa !important;
+    font-family: 'Roboto', sans-serif;
+}
+h1 {
+    color: #0d6efd !important;
+    font-weight: bold;
+}
+.card {
+    border-radius: 12px;
+    border: 2px solid #0d6efd33;
+    box-shadow: 0 4px 8px rgba(0,0,0,0.1);
+}
+.btn-primary {
+    background-color: #0d6efd !important;
+    border-color: #0d6efd !important;
+}
+.btn-outline-secondary {
+    border-color: #ff9933 !important;
+    color: #ff9933 !important;
+}
+.btn-outline-secondary:hover {
+    background-color: #ff9933 !important;
+    color: #fff !important;
+}
+.alert {
+    border-radius: 8px;
+}
+label {
+    font-weight: 500;
+}
+.footer-note {
+    font-size: 0.9rem;
+    color: #6c757d;
+}
+.rail-logo {
+    max-height: 50px;
+    margin-bottom: 15px;
+}
+</style>
+</head>
+<body>
+    <img src="{{ url_for('static', filename='image/azadi.png') }}" 
+     alt="Azadi Logo" 
+     class="azadi-logo">
+
+<div class="container mt-5">
+    <div class="text-center mb-4">
+        <img src="{{ url_for('static', filename='image/rail.png') }}" 
+             alt="Indian Railways Logo" class="rail-logo">
+        <h1>Indian Railways QR Generator</h1>
+    </div>
+
+    <div class="card shadow p-4">
+        {% if error %}
+        <div class="alert alert-danger text-center">{{ error }}</div>
+        {% endif %}
+
+        <form method="POST">
+            <div class="mb-3">
+                <label>UID</label>
+                <input type="text" class="form-control" name="uid" value="{{ request.form.uid or '' }}" required>
+            </div>
+            <div class="mb-3">
+                <label>Item Type</label>
+                <input type="text" class="form-control" name="item_type" value="{{ request.form.item_type or '' }}" required>
+            </div>
+            <div class="mb-3">
+                <label>Vendor</label>
+                <input type="text" class="form-control" name="vendor" value="{{ request.form.vendor or '' }}" required>
+            </div>
+            <div class="mb-3">
+                <label>Lot</label>
+                <input type="text" class="form-control" name="lot" value="{{ request.form.lot or '' }}" required>
+            </div>
+            <div class="mb-3">
+                <label>Manufactor Date</label>
+                <input type="date" class="form-control" name="manufactor_date" value="{{ request.form.manufactor_date or '' }}" required>
+            </div>
+            <div class="mb-3">
+                <label>Supply Date</label>
+                <input type="date" class="form-control" name="supply_date" value="{{ request.form.supply_date or '' }}" required>
+            </div>
+            <div class="mb-3">
+                <label>Warranty End Date</label>
+                <input type="date" class="form-control" name="warranty_end" value="{{ request.form.warranty_end or '' }}" required>
+            </div>
+            <div class="mb-3">
+                <label>Manufactor's Number</label>
+                <input type="text" class="form-control" name="manufactor_number" value="{{ request.form.manufactor_number or '' }}" required>
+            </div>
+            <tr>
+               <th>Notes</th>
+                <td><textarea name="notes" class="form-control" placeholder="Enter maintenance notes"></textarea></td>
+            </tr>
+            <button type="submit" class="btn btn-primary w-100">Generate QR</button>
+        </form>
+
+        <div class="mt-3 text-center">
+            <a href="/all" class="btn btn-outline-secondary">View All Records</a>
+        </div>
+
+        <p class="footer-note text-center mt-3">
+            © Indian Railways Fittings Department
+        </p>
+    </div>
+</div>
+</body>
+</html>
