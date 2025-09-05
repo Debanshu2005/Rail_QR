@@ -14,7 +14,7 @@ import requests
 import qrcode_artistic
 # Try to import AI-stylized QR generator; fall back if unavailable
 try:
-    from qrcode_artistic  import qr_art
+    from qrcode_artistic import qr_art
     HAS_AI_QR = True
 except Exception:
     qr_art = None
@@ -23,7 +23,9 @@ except Exception:
 # OpenCV / numpy / PIL
 import cv2
 import numpy as np
-from PIL import Image
+from PIL import Image, ImageDraw, ImageFont
+import asyncio
+import websockets
 
 # External modules (assumed available)
 from udm import push_to_udm
@@ -37,19 +39,18 @@ DB = 'fittings.db'
 qr_dir = os.path.join("static", "qrcodes")
 os.makedirs(qr_dir, exist_ok=True)
 
-# ESP32 endpoint
-ESP32_IP = "Your ESP32 IP address"
-ESP32_PORT = your port
+# ESP32 endpoint (update if you want)
+ESP32_IP = "192.168.29.109"
+ESP32_WS = f"ws://{ESP32_IP}:81"
 
 # QR Anomaly Detector instance
 qr_detector = QRAnomalyDetector()
 
 # === Configuration: enable/disable AI-stylized QR ===
-# Leave True to attempt AI QR (will auto-fallback to classic if anything fails)
 USE_AI_QR = True
 
-# (Optional) path for a logo/background to embed into AI QR (leave None if not needed)
-AI_QR_EMBED_IMAGE = "D:\\CityGrid\\my-project\\qr demo\\static\\image\\rail.png"  # Your specified image path
+# Path for a logo/background to embed into QR (user insisted logo is mandatory)
+AI_QR_EMBED_IMAGE = "D:\\CityGrid\\my-project\\qr demo\\static\\image\\rail.png"
 
 # === Database Connection Helper ===
 def get_db_connection():
@@ -61,8 +62,6 @@ def get_db_connection():
 def ensure_table_columns():
     conn = get_db_connection()
     c = conn.cursor()
-
-    # Create base table if missing (minimal schema)
     c.execute("""
         CREATE TABLE IF NOT EXISTS fittings (
             uid TEXT PRIMARY KEY,
@@ -83,18 +82,13 @@ def ensure_table_columns():
             vendor_risk TEXT DEFAULT 'Low'
         )
     """)
-
-    # get existing columns
     c.execute("PRAGMA table_info(fittings)")
     existing_cols = {row[1] for row in c.fetchall()}
 
-    # desired additional columns (name: type)
     wanted = {
         "inspection_date": "TEXT",
         "repair_date": "TEXT",
         "failure_count": "INTEGER DEFAULT 0",
-        # manufactor_date/manufactor_number/vendor_risk/vendor_id/etc already in base schema,
-        # but keep checks in case base schema changed.
         "manufactor_date": "TEXT",
         "manufactor_number": "TEXT",
         "vendor_risk": "TEXT",
@@ -214,7 +208,7 @@ def generate_qr_content(uid, item_type, vendor, lot, supply_date, warranty_end, 
     }
     return json.dumps(qr_payload)
 
-# === helper to generate base64 inline QR for templates (unchanged) ===
+# === helper to generate base64 inline QR for templates ===
 def generate_qr_image_base64(qr_content):
     qr = qrcode.QRCode(box_size=8, border=2)
     qr.add_data(qr_content)
@@ -226,96 +220,10 @@ def generate_qr_image_base64(qr_content):
     b64 = base64.b64encode(buf.read()).decode('ascii')
     return b64
 
-# === Centralized QR image saver (AI-stylized with safe fallback) ===
-def save_qr_image(uid, qr_content):
-    """
-    Saves a QR image at static/qrcodes/<uid>.png.
-    Priority:
-    1. Try Stable Diffusion (Replicate API) for anime-style QR if USE_AI_QR enabled.
-    2. If not available/fails, try qrcode_artistic.
-    3. If all fail, fallback to classic QR with logo.
-    """
-    qr_path = os.path.join(qr_dir, f"{uid}.png")
-    
-    # === Step 1: Try anime-style AI QR (Replicate Stable Diffusion + ControlNet) ===
-    if USE_AI_QR and "REPLICATE_API_TOKEN" in os.environ:
-        try:
-            # Create a basic QR code first to use as input
-            basic_qr = qrcode.make(qr_content).convert("RGB")
-            basic_qr_path = os.path.join(qr_dir, f"{uid}_basic.png")
-            basic_qr.save(basic_qr_path)
-            
-            # Convert to base64 for API
-            with open(basic_qr_path, "rb") as f:
-                qr_b64 = base64.b64encode(f.read()).decode("utf-8")
-            
-            # Prepare prompt with logo mention if available
-            prompt = "anime style, pastel colors, kawaii theme, scannable QR code"
-            if AI_QR_EMBED_IMAGE and os.path.exists(AI_QR_EMBED_IMAGE):
-                prompt += ", with a subtle logo in the center"
-            
-            url = "https://api.replicate.com/v1/predictions"
-            headers = {
-                "Authorization": f"Token {os.environ['REPLICATE_API_TOKEN']}",
-                "Content-Type": "application/json"
-            }
-            payload = {
-                "version": "latest",
-                "input": {
-                    "image": qr_b64,
-                    "prompt": prompt,
-                    "strength": 0.85,
-                    "guidance_scale": 7.5
-                }
-            }
-            response = requests.post(url, headers=headers, json=payload)
-            if response.status_code == 201:
-                result = response.json()
-                poll_url = result["urls"]["get"]
-
-                # Poll until complete
-                for _ in range(30):  # Max 30 attempts (60 seconds)
-                    r = requests.get(poll_url, headers=headers)
-                    result = r.json()
-                    if result["status"] == "succeeded":
-                        anime_url = result["output"][0]
-                        img_data = requests.get(anime_url).content
-                        with open(qr_path, "wb") as f:
-                            f.write(img_data)
-                        print(f"[AI QR] Anime-style QR saved at {qr_path}")
-                        
-                        # Clean up temporary file
-                        if os.path.exists(basic_qr_path):
-                            os.remove(basic_qr_path)
-                            
-                        return qr_path
-                    elif result["status"] == "failed":
-                        print("[AI QR] Replicate failed, falling back.")
-                        break
-                    time.sleep(2)
-        except Exception as e:
-            print(f"[AI QR] Exception: {e}, falling back.")
-
-    # === Step 2: Try qrcode_artistic if available ===
-    if USE_AI_QR and HAS_AI_QR:
-        try:
-            ai_img = qr_art(
-                data=qr_content,
-                mode="art",
-                color="black",
-                background="white",
-                embed_img=AI_QR_EMBED_IMAGE if AI_QR_EMBED_IMAGE and os.path.exists(AI_QR_EMBED_IMAGE) else None
-            )
-            if isinstance(ai_img, Image.Image):
-                ai_img.save(qr_path)
-                print(f"[AI QR] Artistic QR saved at {qr_path}")
-                return qr_path
-        except Exception as e:
-            print(f"[AI QR] qrcode_artistic failed: {e}, falling back.")
-
-    # === Step 3: Classic QR with logo fallback ===
+# === Create anime-themed QR code with logo ===
+def create_anime_qr_with_logo(qr_content, logo_path=None):
+    """Create an anime-themed QR code with optional logo"""
     try:
-        # Generate basic QR code
         qr = qrcode.QRCode(
             version=1,
             error_correction=qrcode.constants.ERROR_CORRECT_H,
@@ -324,46 +232,138 @@ def save_qr_image(uid, qr_content):
         )
         qr.add_data(qr_content)
         qr.make(fit=True)
-        
+
         img = qr.make_image(fill_color="black", back_color="white").convert('RGB')
-        
-        # Add logo if available
-        if AI_QR_EMBED_IMAGE and os.path.exists(AI_QR_EMBED_IMAGE):
-            try:
-                logo = Image.open(AI_QR_EMBED_IMAGE)
-                
-                # Calculate logo size (20% of QR code size)
-                base_width = min(img.size[0] // 5, img.size[1] // 5)
-                wpercent = (base_width / float(logo.size[0]))
-                hsize = int((float(logo.size[1]) * float(wpercent)))
-                logo = logo.resize((base_width, hsize), Image.LANCZOS)
-                
-                # Calculate position to center the logo
-                pos = ((img.size[0] - logo.size[0]) // 2, 
-                       (img.size[1] - logo.size[1]) // 2)
-                
-                # Create a transparent background for the logo
-                logo_with_bg = Image.new("RGBA", img.size, (0, 0, 0, 0))
-                logo_with_bg.paste(logo, pos)
-                
-                # Convert QR to RGBA to support transparency
-                img = img.convert("RGBA")
-                
-                # Composite the logo onto the QR code
-                img = Image.alpha_composite(img, logo_with_bg)
-                
-            except Exception as e:
-                print(f"[QR Logo] Failed to add logo: {e}")
-        
-        img.save(qr_path)
-        print(f"[QR] Classic QR saved at {qr_path}")
+
+        # Apply anime-style effects if requested
+        img = apply_anime_effects(img)
+
+        # Add logo (logo is mandatory per your instruction)
+        if logo_path:
+            if os.path.exists(logo_path):
+                img = add_logo_to_qr(img, logo_path)
+            else:
+                print(f"[Logo] Logo file not found at {logo_path} (logo is required). Proceeding without visual logo overlay.")
+        return img
     except Exception as e:
-        print(f"[QR] Exception: {e}")
-    
-    return qr_path
+        print(f"Anime QR creation failed: {e}")
+        return qrcode.make(qr_content).convert('RGB')
+
+def apply_anime_effects(img):
+    """Apply anime-style visual effects to the QR code"""
+    try:
+        img_array = np.array(img)
+        h, w = img_array.shape[:2]
+        for i in range(h):
+            for j in range(w):
+                if img_array[i, j, 0] < 128:  # Dark pixels
+                    if (i + j) % 4 == 0:
+                        img_array[i, j] = [50, 100, 200]
+                    elif (i + j) % 4 == 1:
+                        img_array[i, j] = [200, 100, 150]
+                else:
+                    img_array[i, j] = [245, 230, 240]
+        img = Image.fromarray(img_array.astype('uint8'))
+        draw = ImageDraw.Draw(img)
+        width, height = img.size
+        border_color = (255, 150, 200)
+        draw.rectangle([0, 0, width-1, height-1], outline=border_color, width=3)
+        corner_size = 15
+        for x, y in [(0, 0), (width-corner_size, 0), (0, height-corner_size), (width-corner_size, height-corner_size)]:
+            draw.ellipse([x, y, x+corner_size, y+corner_size], fill=border_color)
+        return img
+    except Exception as e:
+        print(f"Anime effects failed: {e}")
+        return img
+
+def add_logo_to_qr(qr_img, logo_path):
+    """Add logo to the center of QR code"""
+    try:
+        logo = Image.open(logo_path)
+        base_width = min(qr_img.size[0] // 5, qr_img.size[1] // 5)
+        wpercent = (base_width / float(logo.size[0]))
+        hsize = int((float(logo.size[1]) * float(wpercent)))
+        logo = logo.resize((base_width, hsize), Image.LANCZOS)
+
+        pos = ((qr_img.size[0] - logo.size[0]) // 2,
+               (qr_img.size[1] - logo.size[1]) // 2)
+
+        if logo.mode != 'RGBA':
+            logo = logo.convert('RGBA')
+
+        white_bg = Image.new('RGBA', logo.size, (255, 255, 255, 255))
+        white_bg.paste(logo, (0, 0), logo if logo.mode == 'RGBA' else None)
+
+        # Ensure QR image is RGBA to preserve transparency if merging
+        if qr_img.mode != 'RGBA':
+            qr_img = qr_img.convert('RGBA')
+        qr_img.paste(white_bg, pos, white_bg)
+        return qr_img.convert('RGB')
+    except Exception as e:
+        print(f"Logo addition failed: {e}")
+        return qr_img
+
+# === Centralized QR image saver (creates display + engrave) ===
+def save_qr_image(uid, qr_content):
+    """
+    Saves two QR images:
+    - <uid>_display.png (pink background + logo) for UI
+    - <uid>_engrave.png (white background + logo, 1-bit B/W) for laser engraving
+    Returns (display_path, engrave_path)
+    """
+    qr_path_display = os.path.join(qr_dir, f"{uid}_display.png")
+    qr_path_engrave = os.path.join(qr_dir, f"{uid}_engrave.png")
+
+    # Generate base QR
+    qr = qrcode.QRCode(
+        version=1,
+        error_correction=qrcode.constants.ERROR_CORRECT_H,
+        box_size=10,
+        border=4,
+    )
+    qr.add_data(qr_content)
+    qr.make(fit=True)
+
+    # 1) Display QR (pink background)
+    try:
+        if USE_AI_QR:
+            # attempt an "artistic/anime" style first
+            img_disp = create_anime_qr_with_logo(qr_content, AI_QR_EMBED_IMAGE)
+        else:
+            img_disp = qr.make_image(fill_color="black", back_color="pink").convert("RGB")
+            if AI_QR_EMBED_IMAGE and os.path.exists(AI_QR_EMBED_IMAGE):
+                img_disp = add_logo_to_qr(img_disp, AI_QR_EMBED_IMAGE)
+    except Exception as e:
+        print(f"[save_qr_image] display generation failed: {e}")
+        img_disp = qr.make_image(fill_color="black", back_color="pink").convert("RGB")
+        if AI_QR_EMBED_IMAGE and os.path.exists(AI_QR_EMBED_IMAGE):
+            img_disp = add_logo_to_qr(img_disp, AI_QR_EMBED_IMAGE)
+
+    img_disp.save(qr_path_display)
+    print(f"[QR] Display QR saved at {qr_path_display}")
+
+    # 2) Engrave QR (strict black/white, with logo area white to keep scannable)
+    try:
+        img_eng = qr.make_image(fill_color="black", back_color="white").convert("RGB")
+        # Add logo (mandatory) on engrave image as well
+        if AI_QR_EMBED_IMAGE and os.path.exists(AI_QR_EMBED_IMAGE):
+            img_eng = add_logo_to_qr(img_eng, AI_QR_EMBED_IMAGE)
+        # Force strict B/W (1-bit) - helps reduce g-code size and ensures engraving clarity
+        img_eng = img_eng.convert("L").point(lambda p: 0 if p < 128 else 255, "1")
+    except Exception as e:
+        print(f"[save_qr_image] engrave generation failed: {e}")
+        img_eng = qr.make_image(fill_color="black", back_color="white").convert("L").point(lambda p: 0 if p < 128 else 255, "1")
+
+    img_eng.save(qr_path_engrave)
+    print(f"[QR] Engrave QR saved at {qr_path_engrave}")
+
+    return qr_path_display, qr_path_engrave
 
 # === QR -> G-code functions ===
 def qr_to_gcode_final(image_path, laser_power=255, travel_speed=5000, engrave_speed=1500, target_size_mm=25.0):
+    """
+    Vector-like approach: contour-following. Good for fewer G-lines but may produce complex paths.
+    """
     img = cv2.imread(image_path, cv2.IMREAD_GRAYSCALE)
     if img is None:
         return "G21\nG90\nM5\nG0 X0 Y0\n;(Error: Failed to load image)"
@@ -394,7 +394,65 @@ def qr_to_gcode_final(image_path, laser_power=255, travel_speed=5000, engrave_sp
     gcode_lines.append("M5")
     return "\n".join(gcode_lines)
 
+def qr_to_gcode_raster(img_path, laser_power=255, travel_speed=5000,
+                       engrave_speed=1500, target_size_mm=20.0):
+    """
+    Raster engraving: line-by-line (zig-zag) scan producing many lines but simpler control.
+    Produces denser G-code appropriate for raster engravers.
+    """
+    img = cv2.imread(img_path, cv2.IMREAD_GRAYSCALE)
+    if img is None:
+        raise ValueError(f"Cannot load image: {img_path}")
+
+    # Binarize (black=0, white=255)
+    _, bw = cv2.threshold(img, 127, 255, cv2.THRESH_BINARY)
+
+    h, w = bw.shape
+    px_per_mm = w / target_size_mm
+    if px_per_mm == 0:
+        raise ValueError("Invalid scale: px_per_mm == 0")
+    mm_per_px = 1.0 / px_per_mm
+
+    gcode = []
+    gcode.append("G21 ; mm mode")
+    gcode.append("G90 ; absolute positioning")
+    gcode.append("M5  ; laser off")
+    gcode.append(f"G0 F{travel_speed}")
+
+    # iterate rows, zigzag pattern
+    for row in range(h):
+        y_mm = round(row * mm_per_px, 3)
+        # choose forward/backwards scanning
+        if row % 2 == 0:
+            col_iter = range(w)
+        else:
+            col_iter = range(w-1, -1, -1)
+
+        laser_on = False
+        for col in col_iter:
+            pixel = bw[row, col]
+            x_mm = round(col * mm_per_px, 3)
+            if pixel == 0:  # black pixel to engrave
+                if not laser_on:
+                    gcode.append(f"G0 X{x_mm} Y{y_mm} F{travel_speed}")
+                    gcode.append(f"M3 S{laser_power}")
+                    laser_on = True
+                gcode.append(f"G1 X{x_mm} Y{y_mm} F{engrave_speed}")
+            else:
+                if laser_on:
+                    gcode.append("M5")
+                    laser_on = False
+
+        if laser_on:
+            gcode.append("M5")
+            laser_on = False
+
+    gcode.append("M5 ; ensure laser off")
+    gcode.append("G0 X0 Y0 ; go home")
+    return "\n".join(gcode)
+
 def qr_to_gcode_fallback(image_path, laser_power=255, scale=1.0):
+    # Simple horizontal-run fallback scanning
     img = Image.open(image_path).convert("L")
     width, height = img.size
     pixels = img.load()
@@ -421,43 +479,50 @@ def qr_to_gcode_fallback(image_path, laser_power=255, scale=1.0):
     gcode_lines.append("G0 X0 Y0 ; Return to origin")
     return "\n".join(gcode_lines)
 
-# === Send G-code to ESP32 ===
-def send_gcode_to_esp32_enhanced(gcode_text, timeout=3, command_delay=0.02):
-    lines = [line.strip() for line in gcode_text.splitlines() if line.strip() and not line.strip().startswith(';')]
+# === Send G-code to ESP32 over WebSocket ===
+async def send_gcode_websocket(gcode_text, command_delay=0.02):
     try:
-        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        s.settimeout(timeout)
-        s.connect((ESP32_IP, ESP32_PORT))
-        successful_commands = 0
-        total_commands = len(lines)
-        for i, command in enumerate(lines):
+        async with websockets.connect(ESP32_WS) as websocket:
+            # Optionally read an initial greeting from ESP32
             try:
-                s.sendall((command + '\n').encode('utf-8'))
-                s.settimeout(1.0)
-                try:
-                    response = s.recv(32).decode('utf-8', errors='ignore').strip()
-                    if 'ok' in response.lower() or 'done' in response.lower():
-                        successful_commands += 1
-                    else:
-                        print(f"Unexpected response: {response}")
-                except socket.timeout:
-                    successful_commands += 1
-                    print(f"No response for command: {command}")
-                if i % 10 == 0:
-                    print(f"Progress: {i}/{total_commands} commands")
-                time.sleep(command_delay)
-            except Exception as cmd_error:
-                print(f"Error sending command '{command}': {cmd_error}")
-                continue
-        s.close()
-        success_rate = (successful_commands / total_commands) * 100 if total_commands > 0 else 100.0
-        message = f"Completed: {successful_commands}/{total_commands} commands ({success_rate:.1f}%)"
-        return success_rate > 90, message
-    except Exception as e:
-        print(f"Connection error: {e}")
-        return False, f"Connection failed: {e}"
+                first_msg = await asyncio.wait_for(websocket.recv(), timeout=1.0)
+                print(f"ESP32 says: {first_msg}")
+            except Exception:
+                pass
 
-# === Home / Add Fitting ===
+            lines = [line.strip() for line in gcode_text.splitlines() if line.strip() and not line.lstrip().startswith(';')]
+            total = len(lines)
+            success_count = 0
+
+            for i, line in enumerate(lines):
+                await websocket.send(line)
+                try:
+                    ack = await asyncio.wait_for(websocket.recv(), timeout=1.0)
+                    if "ok" in ack.lower() or "ready" in ack.lower():
+                        success_count += 1
+                    else:
+                        print(f"Unexpected ACK: {ack}")
+                except asyncio.TimeoutError:
+                    # no ack — we still proceed but log
+                    print(f"No ACK for: {line[:80]}")
+                if i % 100 == 0:
+                    print(f"Progress: {i}/{total} lines sent")
+                await asyncio.sleep(command_delay)
+
+            rate = (success_count / total) * 100 if total else 100.0
+            return rate > 90, f"Sent {success_count}/{total} ({rate:.1f}%)"
+    except Exception as e:
+        return False, f"WebSocket error: {e}"
+
+def send_gcode_to_esp32_enhanced(gcode_text):
+    """Wrapper so Flask can call the async WebSocket sender and returns (success_bool, message)."""
+    try:
+        return asyncio.run(send_gcode_websocket(gcode_text))
+    except Exception as e:
+        print(f"[send_gcode_to_esp32_enhanced] Exception: {e}")
+        return False, f"Async send failed: {e}"
+
+# === Flask routes (main app) ===
 @app.route('/', methods=['GET', 'POST'])
 def index():
     error = None
@@ -480,13 +545,11 @@ def index():
             error = "UID already exists!"
             return render_template('index.html', error=error, request=request)
 
-        # --- Initialize variables ---
         inspection_date = None
         repair_date = None
         risk_level = "Low"
         vendor_risk = "Low"
 
-        # --- Calculate risk and vendor risk ---
         try:
             payload = {
                 "uid": uid, "item_type": item_type, "vendor": vendor, "lot": lot,
@@ -497,25 +560,21 @@ def index():
         except Exception as e:
             print(f"[Risk Calculation] Exception: {e}")
 
-        # --- Calculate inspection & repair dates safely ---
         try:
             inspection_date, repair_date = calculate_dates(manufactor_date, supply_date, warranty_end, risk_level)
         except Exception as e:
             print(f"[Date Calculation] Exception: {e}")
-            # fallback values
             inspection_date = supply_date or datetime.today().strftime("%Y-%m-%d")
             repair_date = warranty_end or datetime.today().strftime("%Y-%m-%d")
 
-        # --- Generate QR code content ---
         qr_content = generate_qr_content(
             uid, item_type, vendor, lot, supply_date, warranty_end,
             manufactor_date, manufactor_number, notes, risk_level, vendor_risk
         )
 
-        # --- Generate and save QR image (AI or classic) ---
-        qr_path = save_qr_image(uid, qr_content)
+        # returns (display_path, engrave_path)
+        qr_display_path, qr_engrave_path = save_qr_image(uid, qr_content)
 
-        # --- Insert into DB ---
         try:
             c.execute("""INSERT INTO fittings 
                 (uid, item_type, vendor, lot, supply_date, warranty, warranty_end, 
@@ -535,19 +594,17 @@ def index():
             return render_template('index.html', error=error, request=request)
         conn.close()
 
-        # --- Update global risks ---
         try:
             update_all_risks()
         except Exception as e:
             print(f"[Global Risk Update] Exception: {e}")
 
-        # --- Push to UDM ---
+        # push to remote systems (best-effort)
         try:
             payload["repair_date"] = repair_date
             payload["inspection_date"] = inspection_date
             payload["risk"] = risk_level
             payload["vendor_risk"] = vendor_risk
-
             if push_to_udm(payload):
                 conn = get_db_connection()
                 c = conn.cursor()
@@ -557,7 +614,6 @@ def index():
         except Exception as e:
             print(f"[UDM Push] Exception: {e}")
 
-        # --- Push to TMS ---
         try:
             if push_to_tms(payload):
                 conn = get_db_connection()
@@ -572,11 +628,10 @@ def index():
 
     return render_template('index.html', error=error, request=request)
 
-# === View All Fittings ===
 @app.route('/all')
 def view_all():
     sort_by = request.args.get('sort_by', 'uid')
-    valid_columns = ['uid', 'lot', 'supply_date', 'warranty_end','manufactor_date', 'manufactor_number',  'vendor', 'risk', 'item_type', 'vendor_risk']
+    valid_columns = ['uid', 'lot', 'supply_date', 'warranty_end', 'manufactor_date', 'manufactor_number', 'vendor', 'risk', 'item_type', 'vendor_risk']
     if sort_by not in valid_columns:
         sort_by = 'uid'
     conn = get_db_connection()
@@ -593,7 +648,6 @@ def view_all():
 
     return render_template('all.html', rows=data, sort_by=sort_by)
 
-# === View Single Record ===
 @app.route('/view/<uid>')
 def view_record(uid):
     message = request.args.get('msg')
@@ -606,9 +660,19 @@ def view_record(uid):
         return "Not found", 404
     return render_template('view.html', row=row, message=message)
 
-# === Send G-code Manually ===
 @app.route('/send_gcode/<uid>', methods=['POST'])
 def send_gcode(uid):
+    """
+    send_gcode expects form data optionally containing:
+      - method: 'raster' | 'vector' | 'fallback'  (default 'raster')
+      - stream_delay: optional float seconds between lines (default 0.02)
+    """
+    method = request.form.get('method', 'raster').lower()
+    try:
+        command_delay = float(request.form.get('stream_delay', 0.02))
+    except Exception:
+        command_delay = 0.02
+
     conn = get_db_connection()
     c = conn.cursor()
     c.execute("SELECT * FROM fittings WHERE uid=?", (uid,))
@@ -616,31 +680,44 @@ def send_gcode(uid):
     conn.close()
     if not row:
         return f"Fitting with UID {uid} not found.", 404
-    qr_path = os.path.join(qr_dir, f"{uid}.png")
-    
-    # Generate QR code if it doesn't exist or needs update
-    if not os.path.exists(qr_path):
-        row_dict = dict(row)
-        qr_content = generate_qr_content(
-            row_dict.get('uid'), row_dict.get('item_type'), row_dict.get('vendor'), row_dict.get('lot'), 
-            row_dict.get('supply_date'), row_dict.get('warranty_end'), row_dict.get('manufactor_date',''),
-            row_dict.get('manufactor_number',''), row_dict.get('notes',''), 
-            row_dict.get('risk','Low'), row_dict.get('vendor_risk','Low')
-        )
-        save_qr_image(uid, qr_content)  # AI or classic
 
+    row_dict = dict(row)
+    qr_content = generate_qr_content(
+        row_dict.get('uid'), row_dict.get('item_type'), row_dict.get('vendor'), row_dict.get('lot'),
+        row_dict.get('supply_date'), row_dict.get('warranty_end'), row_dict.get('manufactor_date',''),
+        row_dict.get('manufactor_number',''), row_dict.get('notes',''),
+        row_dict.get('risk','Low'), row_dict.get('vendor_risk','Low')
+    )
+
+    # Generate both display + engrave QR; use the engrave one for g-code generation
+    _, qr_path_engrave = save_qr_image(uid, qr_content)
+
+    # Choose generator
     try:
-        gcode_text = qr_to_gcode_final(qr_path, laser_power=255, travel_speed=5000, engrave_speed=1500, target_size_mm=20.0)
-        print(f"Generated {len(gcode_text.splitlines())} lines of G-code")
+        if method == 'vector':
+            gcode_text = qr_to_gcode_final(qr_path_engrave, laser_power=255, travel_speed=5000, engrave_speed=1500, target_size_mm=20.0)
+            print(f"[Vector] Generated {len(gcode_text.splitlines())} lines of G-code")
+        elif method == 'fallback':
+            gcode_text = qr_to_gcode_fallback(qr_path_engrave, laser_power=255, scale=0.5)
+            print(f"[Fallback] Generated {len(gcode_text.splitlines())} lines of G-code")
+        else:  # default raster
+            gcode_text = qr_to_gcode_raster(qr_path_engrave, laser_power=255, travel_speed=5000, engrave_speed=1500, target_size_mm=20.0)
+            print(f"[Raster] Generated {len(gcode_text.splitlines())} lines of G-code")
     except Exception as e:
-        print(f"G-code generation failed: {e}, using fallback")
-        gcode_text = qr_to_gcode_fallback(qr_path, laser_power=255, scale=0.5)
+        print(f"[G-code generation] Failed: {e}")
+        return f"G-code generation failed: {e}", 500
+
+    # Save G-code file
+    gcode_path = os.path.join(qr_dir, f"{uid}_engrave.gcode")
+    with open(gcode_path, "w") as f:
+        f.write(gcode_text)
+    print(f"[GCODE] Saved at {gcode_path}")
+
+    # Stream/send to ESP32 via websocket
     success, resp_text = send_gcode_to_esp32_enhanced(gcode_text)
-    print(f"G-code send result: {success}, {resp_text}")
     msg = f"G-code sent successfully! {resp_text}" if success else f"Failed: {resp_text}"
     return redirect(url_for('view_record', uid=uid, msg=msg))
 
-# === Regenerate QR ===
 @app.route('/regenerate_qr/<uid>', methods=['POST'])
 def regenerate_qr(uid):
     conn = get_db_connection()
@@ -652,16 +729,15 @@ def regenerate_qr(uid):
         return f"Fitting with UID {uid} not found.", 404
     row_dict = dict(row)
     qr_content = generate_qr_content(
-        row_dict.get('uid'), row_dict.get('item_type'), row_dict.get('vendor'), row_dict.get('lot'), 
+        row_dict.get('uid'), row_dict.get('item_type'), row_dict.get('vendor'), row_dict.get('lot'),
         row_dict.get('supply_date'), row_dict.get('warranty_end'), row_dict.get('manufactor_date',''),
-        row_dict.get('manufactor_number',''), row_dict.get('notes',''), 
+        row_dict.get('manufactor_number',''), row_dict.get('notes',''),
         row_dict.get('risk','Low'), row_dict.get('vendor_risk','Low')
     )
-    save_qr_image(uid, qr_content)  # AI or classic
+    save_qr_image(uid, qr_content)
     msg = f"QR regenerated for UID {uid}."
     return redirect(url_for('view_record', uid=uid, msg=msg))
 
-# === QR Code Scanning Endpoint (renders your template) ===
 @app.route('/scan/<uid>', methods=['GET'])
 def scan(uid):
     conn = get_db_connection()
@@ -677,6 +753,8 @@ def scan(uid):
     risk = row_dict.get('risk', 'Unknown')
     vendor_risk = row_dict.get('vendor_risk', 'Unknown')
     inspection_date = row_dict.get('inspection_date') or compute_next_inspection(row_dict.get('inspection_date'), row_dict.get('repair_date'), row_dict.get('risk'))
+
+    # Build QR content; embed minimal info for scanning template
     qr_content = generate_qr_content(
         row_dict.get('uid'),
         row_dict.get('item_type', ''),
@@ -690,6 +768,7 @@ def scan(uid):
         risk,
         vendor_risk
     )
+
     qr_b64 = generate_qr_image_base64(qr_content)
     return render_template(
         'scan_result.html',
@@ -700,34 +779,29 @@ def scan(uid):
         qr_code=qr_b64
     )
 
-# === Test QR Generation ===
 @app.route('/test_qr/<uid>')
 def test_qr(uid):
-    """Test route to see the generated QR code"""
+    """Return the display QR image for visual testing."""
     conn = get_db_connection()
     c = conn.cursor()
     c.execute("SELECT * FROM fittings WHERE uid=?", (uid,))
     row = c.fetchone()
     conn.close()
-    
     if not row:
         return "UID not found", 404
-        
+
     row_dict = dict(row)
     qr_content = generate_qr_content(
-        row_dict.get('uid'), row_dict.get('item_type'), row_dict.get('vendor'), row_dict.get('lot'), 
+        row_dict.get('uid'), row_dict.get('item_type'), row_dict.get('vendor'), row_dict.get('lot'),
         row_dict.get('supply_date'), row_dict.get('warranty_end'), row_dict.get('manufactor_date',''),
-        row_dict.get('manufactor_number',''), row_dict.get('notes',''), 
+        row_dict.get('manufactor_number',''), row_dict.get('notes',''),
         row_dict.get('risk','Low'), row_dict.get('vendor_risk','Low')
     )
-    
-    # Generate the QR code
-    qr_path = save_qr_image(uid, qr_content)
-    
-    # Return the image
-    return send_file(qr_path, mimetype='image/png')
 
-# === Periodic Risk Update ===
+    display_path, _ = save_qr_image(uid, qr_content)
+    return send_file(display_path, mimetype='image/png')
+
+# === Background threads ===
 def periodic_risk_update():
     while True:
         try:
@@ -736,7 +810,6 @@ def periodic_risk_update():
             print("[Risk Update] Exception:", e)
         time.sleep(3600)
 
-# === Validate All QR Codes on Startup ===
 def validate_all_qr_codes():
     conn = get_db_connection()
     c = conn.cursor()
@@ -745,16 +818,16 @@ def validate_all_qr_codes():
     for row in rows:
         row_dict = dict(row)
         uid = row_dict.get('uid')
-        qr_path = os.path.join(qr_dir, f"{uid}.png")
+        display, engrave = os.path.join(qr_dir, f"{uid}_display.png"), os.path.join(qr_dir, f"{uid}_engrave.png")
         qr_content = generate_qr_content(
-            row_dict.get('uid'), row_dict.get('item_type'), row_dict.get('vendor'), row_dict.get('lot'), 
+            row_dict.get('uid'), row_dict.get('item_type'), row_dict.get('vendor'), row_dict.get('lot'),
             row_dict.get('supply_date'), row_dict.get('warranty_end'), row_dict.get('manufactor_date',''),
-            row_dict.get('manufactor_number',''), row_dict.get('notes',''), 
+            row_dict.get('manufactor_number',''), row_dict.get('notes',''),
             row_dict.get('risk','Low'), row_dict.get('vendor_risk','Low')
         )
         try:
-            if not os.path.exists(qr_path):
-                save_qr_image(uid, qr_content)  # AI or classic
+            if not os.path.exists(display) or not os.path.exists(engrave):
+                save_qr_image(uid, qr_content)
                 print(f"[QR Validation] Generated QR for UID {uid}")
         except Exception as e:
             print(f"[QR Validation] Error for UID {uid}: {e}")
@@ -765,7 +838,6 @@ def retry_pending_sync():
     while True:
         conn = get_db_connection()
         c = conn.cursor()
-        # Retry UDM
         c.execute("SELECT * FROM fittings WHERE udm_synced=0")
         pending_udm = c.fetchall()
         for row in pending_udm:
@@ -793,7 +865,6 @@ def retry_pending_sync():
             except Exception as e:
                 print(f"[UDM Retry] error pushing {r.get('uid')}: {e}")
 
-        # Retry TMS
         c.execute("SELECT * FROM fittings WHERE tms_synced=0")
         pending_tms = c.fetchall()
         for row in pending_tms:
@@ -824,7 +895,7 @@ def retry_pending_sync():
         conn.close()
         time.sleep(10)
 
-# === Main ===
+# === Run app ===
 if __name__ == '__main__':
     threading.Thread(target=periodic_risk_update, daemon=True).start()
     threading.Thread(target=validate_all_qr_codes, daemon=True).start()
@@ -835,4 +906,3 @@ if __name__ == '__main__':
     threading.Timer(1.0, open_browser).start()
 
     app.run(debug=True, host="0.0.0.0")
-
