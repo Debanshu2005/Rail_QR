@@ -104,8 +104,9 @@
         </table>
 
         <div class="text-center mt-3">
-            <img src="{{ url_for('static', filename='qrcodes/' + row['uid'] + '.png') }}?{{ range(100000)|random }}"
-                 alt="QR Code" class="img-fluid" style="max-width: 200px;">
+          <img src="{{ url_for('static', filename='qrcodes/' + row['uid'] + '_display.png') }}?{{ range(100000)|random }}"
+             alt="QR Code" class="img-fluid" style="max-width: 200px; background-color: pink; padding: 10px; border-radius: 8px;">
+
             <p class="mt-2 text-muted">Scan this QR to verify fitting details</p>
         </div>
 
@@ -120,6 +121,9 @@
            <button type="submit" class="btn btn-outline-secondary px-4">Regenerate QR</button>
          </form>
 
+         
+
+         <!-- Back to All Records -->
          <a href="/all" class="btn btn-outline-secondary px-4" style="margin-left:10px;">Back to All Records</a>
         </div>
 
