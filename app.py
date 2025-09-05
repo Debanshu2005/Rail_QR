@@ -1,4 +1,4 @@
-from flask import Flask, render_template, request, redirect, url_for, jsonify
+from flask import Flask, render_template, request, redirect, url_for, jsonify, send_file
 import sqlite3
 import os
 import threading
@@ -10,6 +10,15 @@ from datetime import datetime, timedelta
 import io
 import base64
 import qrcode
+import requests
+import qrcode_artistic
+# Try to import AI-stylized QR generator; fall back if unavailable
+try:
+    from qrcode_artistic  import qr_art
+    HAS_AI_QR = True
+except Exception:
+    qr_art = None
+    HAS_AI_QR = False
 
 # OpenCV / numpy / PIL
 import cv2
@@ -34,6 +43,13 @@ ESP32_PORT = 8080
 
 # QR Anomaly Detector instance
 qr_detector = QRAnomalyDetector()
+
+# === Configuration: enable/disable AI-stylized QR ===
+# Leave True to attempt AI QR (will auto-fallback to classic if anything fails)
+USE_AI_QR = True
+
+# (Optional) path for a logo/background to embed into AI QR (leave None if not needed)
+AI_QR_EMBED_IMAGE = "D:\\CityGrid\\my-project\\qr demo\\static\\image\\rail.png"  # Your specified image path
 
 # === Database Connection Helper ===
 def get_db_connection():
@@ -195,11 +211,10 @@ def generate_qr_content(uid, item_type, vendor, lot, supply_date, warranty_end, 
         "notes": notes,
         "risk": risk,
         "vendor_risk": vendor_risk,
-        "scan_url": f"http://127.0.0.1:5000/scan/{uid}"
     }
     return json.dumps(qr_payload)
 
-# === helper to generate base64 inline QR for templates ===
+# === helper to generate base64 inline QR for templates (unchanged) ===
 def generate_qr_image_base64(qr_content):
     qr = qrcode.QRCode(box_size=8, border=2)
     qr.add_data(qr_content)
@@ -210,6 +225,142 @@ def generate_qr_image_base64(qr_content):
     buf.seek(0)
     b64 = base64.b64encode(buf.read()).decode('ascii')
     return b64
+
+# === Centralized QR image saver (AI-stylized with safe fallback) ===
+def save_qr_image(uid, qr_content):
+    """
+    Saves a QR image at static/qrcodes/<uid>.png.
+    Priority:
+    1. Try Stable Diffusion (Replicate API) for anime-style QR if USE_AI_QR enabled.
+    2. If not available/fails, try qrcode_artistic.
+    3. If all fail, fallback to classic QR with logo.
+    """
+    qr_path = os.path.join(qr_dir, f"{uid}.png")
+    
+    # === Step 1: Try anime-style AI QR (Replicate Stable Diffusion + ControlNet) ===
+    if USE_AI_QR and "REPLICATE_API_TOKEN" in os.environ:
+        try:
+            # Create a basic QR code first to use as input
+            basic_qr = qrcode.make(qr_content).convert("RGB")
+            basic_qr_path = os.path.join(qr_dir, f"{uid}_basic.png")
+            basic_qr.save(basic_qr_path)
+            
+            # Convert to base64 for API
+            with open(basic_qr_path, "rb") as f:
+                qr_b64 = base64.b64encode(f.read()).decode("utf-8")
+            
+            # Prepare prompt with logo mention if available
+            prompt = "anime style, pastel colors, kawaii theme, scannable QR code"
+            if AI_QR_EMBED_IMAGE and os.path.exists(AI_QR_EMBED_IMAGE):
+                prompt += ", with a subtle logo in the center"
+            
+            url = "https://api.replicate.com/v1/predictions"
+            headers = {
+                "Authorization": f"Token {os.environ['REPLICATE_API_TOKEN']}",
+                "Content-Type": "application/json"
+            }
+            payload = {
+                "version": "latest",
+                "input": {
+                    "image": qr_b64,
+                    "prompt": prompt,
+                    "strength": 0.85,
+                    "guidance_scale": 7.5
+                }
+            }
+            response = requests.post(url, headers=headers, json=payload)
+            if response.status_code == 201:
+                result = response.json()
+                poll_url = result["urls"]["get"]
+
+                # Poll until complete
+                for _ in range(30):  # Max 30 attempts (60 seconds)
+                    r = requests.get(poll_url, headers=headers)
+                    result = r.json()
+                    if result["status"] == "succeeded":
+                        anime_url = result["output"][0]
+                        img_data = requests.get(anime_url).content
+                        with open(qr_path, "wb") as f:
+                            f.write(img_data)
+                        print(f"[AI QR] Anime-style QR saved at {qr_path}")
+                        
+                        # Clean up temporary file
+                        if os.path.exists(basic_qr_path):
+                            os.remove(basic_qr_path)
+                            
+                        return qr_path
+                    elif result["status"] == "failed":
+                        print("[AI QR] Replicate failed, falling back.")
+                        break
+                    time.sleep(2)
+        except Exception as e:
+            print(f"[AI QR] Exception: {e}, falling back.")
+
+    # === Step 2: Try qrcode_artistic if available ===
+    if USE_AI_QR and HAS_AI_QR:
+        try:
+            ai_img = qr_art(
+                data=qr_content,
+                mode="art",
+                color="black",
+                background="white",
+                embed_img=AI_QR_EMBED_IMAGE if AI_QR_EMBED_IMAGE and os.path.exists(AI_QR_EMBED_IMAGE) else None
+            )
+            if isinstance(ai_img, Image.Image):
+                ai_img.save(qr_path)
+                print(f"[AI QR] Artistic QR saved at {qr_path}")
+                return qr_path
+        except Exception as e:
+            print(f"[AI QR] qrcode_artistic failed: {e}, falling back.")
+
+    # === Step 3: Classic QR with logo fallback ===
+    try:
+        # Generate basic QR code
+        qr = qrcode.QRCode(
+            version=1,
+            error_correction=qrcode.constants.ERROR_CORRECT_H,
+            box_size=10,
+            border=4,
+        )
+        qr.add_data(qr_content)
+        qr.make(fit=True)
+        
+        img = qr.make_image(fill_color="black", back_color="white").convert('RGB')
+        
+        # Add logo if available
+        if AI_QR_EMBED_IMAGE and os.path.exists(AI_QR_EMBED_IMAGE):
+            try:
+                logo = Image.open(AI_QR_EMBED_IMAGE)
+                
+                # Calculate logo size (20% of QR code size)
+                base_width = min(img.size[0] // 5, img.size[1] // 5)
+                wpercent = (base_width / float(logo.size[0]))
+                hsize = int((float(logo.size[1]) * float(wpercent)))
+                logo = logo.resize((base_width, hsize), Image.LANCZOS)
+                
+                # Calculate position to center the logo
+                pos = ((img.size[0] - logo.size[0]) // 2, 
+                       (img.size[1] - logo.size[1]) // 2)
+                
+                # Create a transparent background for the logo
+                logo_with_bg = Image.new("RGBA", img.size, (0, 0, 0, 0))
+                logo_with_bg.paste(logo, pos)
+                
+                # Convert QR to RGBA to support transparency
+                img = img.convert("RGBA")
+                
+                # Composite the logo onto the QR code
+                img = Image.alpha_composite(img, logo_with_bg)
+                
+            except Exception as e:
+                print(f"[QR Logo] Failed to add logo: {e}")
+        
+        img.save(qr_path)
+        print(f"[QR] Classic QR saved at {qr_path}")
+    except Exception as e:
+        print(f"[QR] Exception: {e}")
+    
+    return qr_path
 
 # === QR -> G-code functions ===
 def qr_to_gcode_final(image_path, laser_power=255, travel_speed=5000, engrave_speed=1500, target_size_mm=25.0):
@@ -307,7 +458,6 @@ def send_gcode_to_esp32_enhanced(gcode_text, timeout=3, command_delay=0.02):
         return False, f"Connection failed: {e}"
 
 # === Home / Add Fitting ===
-# === Home / Add Fitting ===
 @app.route('/', methods=['GET', 'POST'])
 def index():
     error = None
@@ -362,17 +512,8 @@ def index():
             manufactor_date, manufactor_number, notes, risk_level, vendor_risk
         )
 
-        # --- Generate and save QR image ---
-        qr_path = os.path.join(qr_dir, f"{uid}.png")
-        try:
-            status, img = qr_detector.generate_qr(qr_content)
-            if isinstance(img, np.ndarray):
-                img = Image.fromarray(cv2.cvtColor(img, cv2.COLOR_BGR2RGB))
-            elif img is None:
-                img = qrcode.make(qr_content).convert("RGB")
-            img.save(qr_path)
-        except Exception as e:
-            print(f"[QR Generation] Exception: {e}")
+        # --- Generate and save QR image (AI or classic) ---
+        qr_path = save_qr_image(uid, qr_content)
 
         # --- Insert into DB ---
         try:
@@ -486,13 +627,7 @@ def send_gcode(uid):
             row_dict.get('manufactor_number',''), row_dict.get('notes',''), 
             row_dict.get('risk','Low'), row_dict.get('vendor_risk','Low')
         )
-        status, img = qr_detector.generate_qr(qr_content)
-        if isinstance(img, np.ndarray):
-            img = Image.fromarray(cv2.cvtColor(img, cv2.COLOR_BGR2RGB))
-        elif img is None:
-            img = qrcode.make(qr_content).convert("RGB")
-        # img is now PIL image guaranteed
-        img.save(qr_path)
+        save_qr_image(uid, qr_content)  # AI or classic
 
     try:
         gcode_text = qr_to_gcode_final(qr_path, laser_power=255, travel_speed=5000, engrave_speed=1500, target_size_mm=20.0)
@@ -522,14 +657,8 @@ def regenerate_qr(uid):
         row_dict.get('manufactor_number',''), row_dict.get('notes',''), 
         row_dict.get('risk','Low'), row_dict.get('vendor_risk','Low')
     )
-    
-    status, img = qr_detector.generate_qr(qr_content)
-    if isinstance(img, np.ndarray):
-        img = Image.fromarray(cv2.cvtColor(img, cv2.COLOR_BGR2RGB))
-    elif img is None:
-        img = qrcode.make(qr_content).convert("RGB")
-    img.save(os.path.join(qr_dir, f"{uid}.png"))
-    msg = f"QR regenerated for UID {uid}." if status == "valid" else f"QR regenerated for UID {uid}, anomaly detected."
+    save_qr_image(uid, qr_content)  # AI or classic
+    msg = f"QR regenerated for UID {uid}."
     return redirect(url_for('view_record', uid=uid, msg=msg))
 
 # === QR Code Scanning Endpoint (renders your template) ===
@@ -571,6 +700,33 @@ def scan(uid):
         qr_code=qr_b64
     )
 
+# === Test QR Generation ===
+@app.route('/test_qr/<uid>')
+def test_qr(uid):
+    """Test route to see the generated QR code"""
+    conn = get_db_connection()
+    c = conn.cursor()
+    c.execute("SELECT * FROM fittings WHERE uid=?", (uid,))
+    row = c.fetchone()
+    conn.close()
+    
+    if not row:
+        return "UID not found", 404
+        
+    row_dict = dict(row)
+    qr_content = generate_qr_content(
+        row_dict.get('uid'), row_dict.get('item_type'), row_dict.get('vendor'), row_dict.get('lot'), 
+        row_dict.get('supply_date'), row_dict.get('warranty_end'), row_dict.get('manufactor_date',''),
+        row_dict.get('manufactor_number',''), row_dict.get('notes',''), 
+        row_dict.get('risk','Low'), row_dict.get('vendor_risk','Low')
+    )
+    
+    # Generate the QR code
+    qr_path = save_qr_image(uid, qr_content)
+    
+    # Return the image
+    return send_file(qr_path, mimetype='image/png')
+
 # === Periodic Risk Update ===
 def periodic_risk_update():
     while True:
@@ -598,12 +754,7 @@ def validate_all_qr_codes():
         )
         try:
             if not os.path.exists(qr_path):
-                status, img = qr_detector.generate_qr(qr_content)
-                if isinstance(img, np.ndarray):
-                    img = Image.fromarray(cv2.cvtColor(img, cv2.COLOR_BGR2RGB))
-                elif img is None:
-                    img = qrcode.make(qr_content).convert("RGB")
-                img.save(qr_path)
+                save_qr_image(uid, qr_content)  # AI or classic
                 print(f"[QR Validation] Generated QR for UID {uid}")
         except Exception as e:
             print(f"[QR Validation] Error for UID {uid}: {e}")
