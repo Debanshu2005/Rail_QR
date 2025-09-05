@@ -38,8 +38,8 @@ qr_dir = os.path.join("static", "qrcodes")
 os.makedirs(qr_dir, exist_ok=True)
 
 # ESP32 endpoint
-ESP32_IP = "192.168.29.109"
-ESP32_PORT = 8080
+ESP32_IP = "Your ESP32 IP address"
+ESP32_PORT = your port
 
 # QR Anomaly Detector instance
 qr_detector = QRAnomalyDetector()
@@ -835,3 +835,4 @@ if __name__ == '__main__':
     threading.Timer(1.0, open_browser).start()
 
     app.run(debug=True, host="0.0.0.0")
+
