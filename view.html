@@ -24,6 +24,9 @@
     .rail-logo { max-height: 50px; margin-bottom: 15px; }
     .footer-note { font-size: 0.9rem; color: #6c757d; }
     .alert-msg { margin-bottom: 15px; }
+    .vendor-link { color: #0d6efd; text-decoration: none; }
+    .vendor-link:hover { text-decoration: underline; }
+    .engrave-options { background-color: #f9f9f9; padding: 15px; border-radius: 5px; margin-top: 15px; }
 </style>
 </head>
 <body>
@@ -45,12 +48,25 @@
         <table class="table table-bordered">
             <tr><th>UID</th><td>{{ row['uid'] }}</td></tr>
             <tr><th>Item Type</th><td>{{ row['item_type'] }}</td></tr>
-            <tr><th>Vendor</th><td>{{ row['vendor'] }}</td></tr>
+            <tr>
+                <th>Vendor</th>
+                <td>
+                    {% if row['vendor_id'] %}
+                        <a href="{{ url_for('vendor_details', vendor_id=row['vendor_id']) }}" class="vendor-link">
+                            {{ row['vendor'] }}
+                        </a>
+                    {% else %}
+                        {{ row['vendor'] }}
+                    {% endif %}
+                </td>
+            </tr>
             <tr><th>Lot</th><td>{{ row['lot'] }}</td></tr>
             <tr><th>Date of Supply</th><td>{{ row['supply_date'] }}</td></tr>
             <tr><th>Warranty End</th><td>{{ row['warranty_end'] }}</td></tr>
-            <tr><th>Manufactor Date</th><td>{{ row['manufactor_date'] }}</td></tr>
-            <tr><th>Manufactor's Number</th><td>{{ row['manufactor_number'] }}</td></tr>
+            <tr><th>Manufacture Date</th><td>{{ row['manufactor_date'] }}</td></tr>
+            <tr><th>Manufacturer's Number</th><td>{{ row['manufactor_number'] }}</td></tr>
+            <tr><th>Manufacturer's Email ID</th><td>{{ row['vendor_email'] }}</td></tr>
+
             <tr>
                 <th>UDM Sync</th>
                 <td>
@@ -83,7 +99,6 @@
                     {% endif %}
                 </td>
             </tr>
-            <!-- NEW ROW FOR INSPECTION / REPAIR DATE -->
             <tr>
                 <th>Next Inspection / Repair Date</th>
                 <td>{{ row['inspection_date'] }}</td>
@@ -110,25 +125,84 @@
             <p class="mt-2 text-muted">Scan this QR to verify fitting details</p>
         </div>
 
+        <div class="engrave-options">
+            <h5 class="text-center mb-3">QR Code Engraving Options</h5>
+            
+            <!-- Send G-code to ESP32 Button -->
+            <form method="POST" action="{{ url_for('send_gcode', uid=row['uid']) }}" class="text-center mb-3">
+                <div class="row justify-content-center">
+                    <div class="col-md-4 mb-2">
+                        <select name="method" class="form-select">
+                            <option value="raster">Raster Engraving</option>
+                            <option value="vector">Vector Engraving</option>
+                            <option value="fallback">Fallback Method</option>
+                        </select>
+                    </div>
+                    <div class="col-md-3 mb-2">
+                        <input type="number" name="stream_delay" value="0.02" step="0.01" min="0.01" max="1.0" 
+                               class="form-control" placeholder="Command Delay">
+                    </div>
+                    <div class="col-md-3">
+                        <button type="submit" class="btn btn-primary w-100">Send to Engraver</button>
+                    </div>
+                </div>
+            </form>
+
+            <div class="text-center">
+                <!-- Regenerate QR Button -->
+                <form method="POST" action="{{ url_for('regenerate_qr', uid=row['uid']) }}" style="display:inline; margin-right:10px;">
+                    <button type="submit" class="btn btn-outline-secondary px-4">Regenerate QR</button>
+                </form>
+
+                <!-- Test QR Button -->
+                <a href="{{ url_for('test_qr', uid=row['uid']) }}" class="btn btn-outline-info px-4" style="margin-right:10px;">
+                    Test QR
+                </a>
+
+                <!-- Scan QR Button -->
+                <a href="{{ url_for('scan', uid=row['uid']) }}" class="btn btn-outline-success px-4">
+                    Scan QR
+                </a>
+            </div>
+        </div>
+
         <div class="mt-4 text-center">
-         <!-- Send G-code to ESP32 Button -->
-         <form method="POST" action="{{ url_for('send_gcode', uid=row['uid']) }}" style="display:inline;">
-            <button type="submit" class="btn btn-primary px-4">Send QR as G-code to ESP32</button>
-         </form>
-
-         <!-- Regenerate QR Button -->
-         <form method="POST" action="{{ url_for('regenerate_qr', uid=row['uid']) }}" style="display:inline; margin-left:10px;">
-           <button type="submit" class="btn btn-outline-secondary px-4">Regenerate QR</button>
-         </form>
-
-         
-
-         <!-- Back to All Records -->
-         <a href="/all" class="btn btn-outline-secondary px-4" style="margin-left:10px;">Back to All Records</a>
+            <!-- Back to All Records -->
+            <a href="/all" class="btn btn-outline-secondary px-4">Back to All Records</a>
+            
+            <!-- Vendor Dashboard Link (if applicable) -->
+            {% if row['vendor_id'] %}
+                <a href="{{ url_for('vendor_dashboard') }}" class="btn btn-outline-primary px-4" style="margin-left:10px;">
+                    Vendor Dashboard
+                </a>
+            {% endif %}
         </div>
 
         <p class="footer-note text-center mt-3">© Indian Railways Fittings Department</p>
     </div>
 </div>
+
+<script>
+// Simple confirmation for regenerate action
+document.addEventListener('DOMContentLoaded', function() {
+    const regenerateForm = document.querySelector('form[action*="regenerate_qr"]');
+    if (regenerateForm) {
+        regenerateForm.addEventListener('submit', function(e) {
+            if (!confirm('Are you sure you want to regenerate the QR code? This will create a new QR code image.')) {
+                e.preventDefault();
+            }
+        });
+    }
+    
+    const sendGcodeForm = document.querySelector('form[action*="send_gcode"]');
+    if (sendGcodeForm) {
+        sendGcodeForm.addEventListener('submit', function(e) {
+            if (!confirm('This will send G-code commands to the engraving machine. Continue?')) {
+                e.preventDefault();
+            }
+        });
+    }
+});
+</script>
 </body>
 </html>
