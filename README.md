@@ -2,9 +2,15 @@
 
 This repository contains the **Vendor Site** for the Railway QR Project.  
 Vendors can register, manage their fittings, generate **AI-based QR codes**, and transmit G-codes to an ESP32 for engraving/printing.
+
 ---
 
 ##  Screenshots
+
+- Vendor Registration Page
+
+   ![WhatsApp Image 2025-09-13 at 00 34 31_58da419a](https://github.com/user-attachments/assets/5743408b-a9a0-4537-880c-39ed4c4a360d)
+
 
 - Vendor Login Page
   
@@ -78,7 +84,7 @@ Vendors can register, manage their fittings, generate **AI-based QR codes**, and
 - **Backend:** Flask 
 - **Database:** SQLite 
 - **QR Generation:** Python QR libraries / AI-based QR styling  
-- **Hardware Communication:** Serial/Wi-Fi transfer to ESP32  
+- **Hardware Communication:** Wi-Fi transfer of generated G-codes to ESP32  
 
 ---
 
