@@ -60,7 +60,7 @@ Vendors can register, manage their fittings, generate **AI-based QR codes**, and
    - Data stored in the backend for future inspections & tracking.  
 
 4. **AI-based QR Code Generation**  
-   - Automatically generate unique QR codes for each fitting.  
+   - Generate unique QR codes for each fitting.  
    - Codes are linked to the vendor database.  
 
 5. **Convert QR to G-codes & Transmit to ESP32**  
@@ -127,6 +127,39 @@ python app.py
 - The ESP32 executes the engraving on the selected material.
 
 ---
+## Project Structure
+
+  ```bash
+
+qr demo/
+ |_app.py
+ |_ai.module.py
+ |_fix.py
+ |_udm.py
+ |_tms.py
+ |_vendors.db
+ |_fittings.db
+ |_templates/
+ |   |_all.html
+ |   |_scan.html
+ |   |_index.html
+ |   |_view.html
+ |   |_vendor_dadhboard.html
+ |   |_vendor_login.html
+ |   |_vendor_details.html
+ |   |_vendor_registration.html
+ |_static/
+    |_image/
+    |  |_azadi.png
+    |  |_rail.png
+    |_qrcodes/
+    |   |_stores all the generated qr codes
+    |_vendor_gcodes/
+    |   |_stores the G-codes for the vendor qr codes
+    |_vendor_qrcodes/
+       |_stores all the vendor beased qr codes
+  ```
+
 
 ## License
 
